@@ -16,28 +16,31 @@ let db = {
 // Middleware to check if user is admin
 const isAdmin = (msg) => msg.from.id === adminId;
 
+// Helper: Cleans group titles of special characters so they don't crash Telegram messages
+const cleanTitle = (title) => title ? title.replace(/[_*[\]()~`>#+-=|{}.!]/g, '') : "Group";
+
 // 1. Handle adding/removing the bot from groups
 bot.on('my_chat_member', (msg) => {
     const chat = msg.chat;
     const status = msg.new_chat_member.status;
 
     if (chat.type === 'group' || chat.type === 'supergroup') {
+        const safeTitle = cleanTitle(chat.title);
+        
         if (status === 'administrator' || status === 'member') {
-            // Add to database if not exists
             if (!db.groups.find(g => g.id === chat.id)) {
                 db.groups.push({ 
                     id: chat.id, 
-                    title: chat.title,
+                    title: safeTitle,
                     delayMs: 0,       
                     autoAccept: true, 
-                    pendingUsers: [] // The waiting room array
+                    pendingUsers: [] 
                 });
-                bot.sendMessage(adminId, `✅ Bot added to group: ${chat.title}\n*Auto-accept is ON by default.*`, { parse_mode: 'Markdown' });
+                bot.sendMessage(adminId, `✅ **NEW GROUP ADDED**\nName: ${safeTitle}\nStatus: Auto-accept is 🟢 ON by default.`, { parse_mode: 'HTML' });
             }
         } else if (status === 'kicked' || status === 'left') {
-            // Remove from database
             db.groups = db.groups.filter(g => g.id !== chat.id);
-            bot.sendMessage(adminId, `❌ Bot removed from group: ${chat.title}`);
+            bot.sendMessage(adminId, `❌ **GROUP REMOVED**\nBot was removed from: ${safeTitle}`, { parse_mode: 'HTML' });
         }
     }
 });
@@ -52,46 +55,32 @@ bot.on('chat_join_request', async (msg) => {
     // If group not found or auto-accept is OFF, ignore the request
     if (!group || group.autoAccept === false) return;
 
-    // Make sure the pending list exists
     if (!group.pendingUsers) group.pendingUsers = [];
 
-    // If delay is 0, accept instantly without batching
+    // If delay is 0, accept instantly
     if (group.delayMs === 0) {
         try {
             await bot.approveChatJoinRequest(chatId, userId);
             if (db.welcomeMessage) await bot.sendMessage(userId, db.welcomeMessage);
-        } catch (error) {
-            console.error(`Failed to instant-accept user ${userId}`);
-        }
+        } catch (error) {}
         return;
     }
 
-    // Add user to the waiting room
+    // Add user to waiting room
     group.pendingUsers.push(userId);
 
-    // If this is the FIRST person in the waiting room, start the batch timer
+    // If FIRST person in waiting room, start batch timer
     if (group.pendingUsers.length === 1) {
-        
         setTimeout(async () => {
-            // Lock in the current batch and clear the waiting room for the next batch
             const usersToAccept = [...group.pendingUsers];
             group.pendingUsers = []; 
 
-            // Process everyone in the batch
             for (const uid of usersToAccept) {
                 try {
                     await bot.approveChatJoinRequest(chatId, uid);
-                    if (db.welcomeMessage) {
-                        await bot.sendMessage(uid, db.welcomeMessage);
-                    }
-                } catch (error) {
-                    console.error(`Failed to process join request for user ${uid}`);
-                }
+                    if (db.welcomeMessage) await bot.sendMessage(uid, db.welcomeMessage);
+                } catch (error) {}
             }
-            
-            // Optional: Notify admin that a batch was processed
-            // bot.sendMessage(adminId, `✅ Batch processed: Accepted ${usersToAccept.length} users into ${group.title}.`);
-
         }, group.delayMs);
     }
 });
@@ -100,15 +89,15 @@ bot.on('chat_join_request', async (msg) => {
 bot.on('message', async (msg) => {
     if (!msg.text || !isAdmin(msg) || msg.chat.type !== 'private') return;
 
-    const text = msg.text;
+    const text = msg.text.trim(); // Removes accidental spaces
 
     // Command: /botmsg [text]
     if (text.startsWith('/botmsg')) {
         const newMsg = text.replace('/botmsg', '').trim();
-        if (!newMsg) return bot.sendMessage(adminId, "⚠️ Please include the message on the same line.");
+        if (!newMsg) return bot.sendMessage(adminId, "⚠️ **Oops!** You forgot the message.\nExample: <code>/botmsg Welcome to the club!</code>", { parse_mode: 'HTML' });
         
         db.welcomeMessage = newMsg;
-        bot.sendMessage(adminId, `✅ Welcome message updated to:\n\n${db.welcomeMessage}`);
+        bot.sendMessage(adminId, `✅ **MESSAGE UPDATED**\nUsers will now receive this DM when accepted:\n\n${db.welcomeMessage}`, { parse_mode: 'HTML' });
     }
 
     // Command: /setdelay [group_number] [seconds]
@@ -118,14 +107,14 @@ bot.on('message', async (msg) => {
         const seconds = parseInt(args[2]);
 
         if (isNaN(groupNum) || isNaN(seconds)) {
-            return bot.sendMessage(adminId, "⚠️ **Format:** `/setdelay [group_number] [seconds]`", { parse_mode: 'Markdown' });
+            return bot.sendMessage(adminId, "⚠️ **Invalid Format.**\nExample: <code>/setdelay 1 15</code> (Sets Group 1 to wait 15 seconds before accepting)", { parse_mode: 'HTML' });
         }
 
         const groupIndex = groupNum - 1;
-        if (!db.groups[groupIndex]) return bot.sendMessage(adminId, "⚠️ Invalid group number.");
+        if (!db.groups[groupIndex]) return bot.sendMessage(adminId, "⚠️ Invalid group number. Send /groups to check your list.");
 
         db.groups[groupIndex].delayMs = seconds * 1000;
-        bot.sendMessage(adminId, `✅ Batch waiting time for **${db.groups[groupIndex].title}** set to ${seconds} seconds.`, { parse_mode: 'Markdown' });
+        bot.sendMessage(adminId, `✅ **DELAY SET SUCCESSFULLY**\nGroup: ${db.groups[groupIndex].title}\nBot will now wait ${seconds} seconds to gather users before accepting them all at once.`, { parse_mode: 'HTML' });
     }
 
     // Command: /toggle [group_number]
@@ -133,34 +122,39 @@ bot.on('message', async (msg) => {
         const args = text.split(' ');
         const groupNum = parseInt(args[1]);
 
-        if (isNaN(groupNum)) return bot.sendMessage(adminId, "⚠️ **Format:** `/toggle [group_number]`", { parse_mode: 'Markdown' });
+        if (isNaN(groupNum)) return bot.sendMessage(adminId, "⚠️ **Invalid Format.**\nExample: <code>/toggle 1</code> (Turns Group 1 ON or OFF)", { parse_mode: 'HTML' });
 
         const groupIndex = groupNum - 1;
-        if (!db.groups[groupIndex]) return bot.sendMessage(adminId, "⚠️ Invalid group number.");
+        if (!db.groups[groupIndex]) return bot.sendMessage(adminId, "⚠️ Invalid group number. Send /groups to check your list.");
 
         db.groups[groupIndex].autoAccept = !db.groups[groupIndex].autoAccept;
-        const status = db.groups[groupIndex].autoAccept ? "🟢 ON" : "🔴 OFF";
-        bot.sendMessage(adminId, `⚙️ Auto-accept for **${db.groups[groupIndex].title}** is now ${status}`, { parse_mode: 'Markdown' });
+        
+        const isNowOn = db.groups[groupIndex].autoAccept;
+        const statusText = isNowOn ? "🟢 ON (Bot is accepting users)" : "🔴 OFF (Bot is ignoring join requests)";
+        
+        bot.sendMessage(adminId, `⚙️ **STATUS CHANGED**\nGroup: ${db.groups[groupIndex].title}\nAuto-Accept is now: ${statusText}`, { parse_mode: 'HTML' });
     }
 
     // Command: /groups - Dashboard view
-    else if (text === '/groups') {
-        if (db.groups.length === 0) return bot.sendMessage(adminId, "You haven't added the bot to any groups yet.");
+    else if (text.startsWith('/groups')) {
+        if (db.groups.length === 0) {
+            return bot.sendMessage(adminId, "⚠️ You haven't added the bot to any groups yet.\n\n*(Note: If Railway restarted, the bot's memory was wiped. Remove the bot from your group and add it back to re-register it).*");
+        }
         
-        let list = "📋 **Managed Groups Dashboard:**\n\n";
+        let list = "📋 <b>MANAGED GROUPS DASHBOARD:</b>\n\n";
         db.groups.forEach((g, index) => {
             const status = g.autoAccept ? "🟢 ON" : "🔴 OFF";
             const delay = g.delayMs / 1000;
             const waitingCount = g.pendingUsers ? g.pendingUsers.length : 0;
-            list += `**${index + 1}. ${g.title}**\n   ↳ Status: ${status} | Wait Time: ${delay}s | In Waiting Room: ${waitingCount}\n\n`;
+            list += `<b>${index + 1}. ${g.title}</b>\n   ↳ Accept Users: ${status}\n   ↳ Wait Time: ${delay} seconds\n   ↳ Users Waiting: ${waitingCount}\n\n`;
         });
         
-        bot.sendMessage(adminId, list, { parse_mode: 'Markdown' });
+        bot.sendMessage(adminId, list, { parse_mode: 'HTML' });
     }
 
     // Command: /group [number] - Broadcast
     else if (text.startsWith('/group ')) {
-        if (!msg.reply_to_message) return bot.sendMessage(adminId, "⚠️ Please **reply** to the message you want to send.");
+        if (!msg.reply_to_message) return bot.sendMessage(adminId, "⚠️ Please <b>reply</b> to the message you want to send.", { parse_mode: 'HTML' });
         
         const groupIndex = parseInt(text.split(' ')[1]) - 1;
         const targetGroup = db.groups[groupIndex];
@@ -168,17 +162,19 @@ bot.on('message', async (msg) => {
         if (targetGroup) {
             try {
                 await bot.copyMessage(targetGroup.id, adminId, msg.reply_to_message.message_id);
-                bot.sendMessage(adminId, `✅ Message sent to ${targetGroup.title}`);
+                bot.sendMessage(adminId, `✅ <b>BROADCAST SUCCESSFUL</b>\nMessage sent to: ${targetGroup.title}`, { parse_mode: 'HTML' });
             } catch (err) {
-                bot.sendMessage(adminId, `❌ Failed to send to ${targetGroup.title}. Ensure bot is admin.`);
+                bot.sendMessage(adminId, `❌ <b>BROADCAST FAILED</b>\nCould not send to ${targetGroup.title}. Ensure the bot still has Admin permissions to send messages.`, { parse_mode: 'HTML' });
             }
+        } else {
+            bot.sendMessage(adminId, "⚠️ Invalid group number.");
         }
     }
 
     // Command: /all - Broadcast
     else if (text === '/all') {
-        if (!msg.reply_to_message) return bot.sendMessage(adminId, "⚠️ Please **reply** to the message you want to send.");
-        if (db.groups.length === 0) return bot.sendMessage(adminId, "No groups available.");
+        if (!msg.reply_to_message) return bot.sendMessage(adminId, "⚠️ Please <b>reply</b> to the message you want to send.", { parse_mode: 'HTML' });
+        if (db.groups.length === 0) return bot.sendMessage(adminId, "No groups available to send to.");
 
         let successCount = 0;
         bot.sendMessage(adminId, `⏳ Broadcasting to ${db.groups.length} groups...`);
@@ -189,26 +185,26 @@ bot.on('message', async (msg) => {
                 successCount++;
             } catch (err) {}
         }
-        bot.sendMessage(adminId, `✅ Broadcast complete. Successfully sent to ${successCount}/${db.groups.length} groups.`);
+        bot.sendMessage(adminId, `✅ <b>BROADCAST COMPLETE</b>\nSuccessfully sent to ${successCount} out of ${db.groups.length} groups.`, { parse_mode: 'HTML' });
     }
 
     // Command: /start - Help menu
     else if (text === '/start') {
         const helpText = `
-🛠 **Advanced Admin Dashboard**
+🛠 <b>ADVANCED ADMIN DASHBOARD</b>
 
-**Auto-Accept Settings:**
-\`/groups\` - View all groups and see who is currently waiting
-\`/toggle 1\` - Turn auto-accept ON or OFF for Group 1
-\`/setdelay 1 15\` - Set Group 1 to gather users for 15 seconds before accepting them all at once.
-\`/botmsg [text]\` - Set the DM for accepted users
+<b>Settings & Status:</b>
+<code>/groups</code> - View all groups and status
+<code>/toggle 1</code> - Turn auto-accept ON/OFF for Group 1
+<code>/setdelay 1 15</code> - Set Group 1 to wait 15 seconds
+<code>/botmsg [text]</code> - Set DM for accepted users
 
-**Broadcasting:**
-1. Send the perfect message (images/buttons) here in my DMs.
-2. **Reply** to it with \`/group 1\` to send to Group 1.
-3. **Reply** to it with \`/all\` to send to everyone.
+<b>Broadcasting:</b>
+1. Send an image/button/text message here.
+2. <b>Reply</b> to it with <code>/group 1</code> to send to Group 1.
+3. <b>Reply</b> to it with <code>/all</code> to send to everyone.
         `;
-        bot.sendMessage(adminId, helpText, { parse_mode: 'Markdown' });
+        bot.sendMessage(adminId, helpText, { parse_mode: 'HTML' });
     }
 });
 
