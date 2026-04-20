@@ -10,13 +10,13 @@ const bot = new TelegramBot(token, { polling: true });
 // In-memory "Database"
 let db = {
     welcomeMessage: "Hello! Your request to join has been approved.",
-    groups: [] // Array to store { id, title, delayMs, autoAccept, pendingUsers }
+    groups: [] 
 };
 
 // Middleware to check if user is admin
 const isAdmin = (msg) => msg.from.id === adminId;
 
-// Helper: Cleans group titles of special characters so they don't crash Telegram messages
+// Helper: Cleans group titles of special characters
 const cleanTitle = (title) => title ? title.replace(/[_*[\]()~`>#+-=|{}.!]/g, '') : "Group";
 
 // 1. Handle adding/removing the bot from groups
@@ -36,49 +36,67 @@ bot.on('my_chat_member', (msg) => {
                     autoAccept: true, 
                     pendingUsers: [] 
                 });
-                bot.sendMessage(adminId, `✅ **NEW GROUP ADDED**\nName: ${safeTitle}\nStatus: Auto-accept is 🟢 ON by default.`, { parse_mode: 'HTML' });
+                bot.sendMessage(adminId, `✅ <b>NEW GROUP ADDED</b>\nName: ${safeTitle}\nStatus: Auto-accept is 🟢 ON by default.`, { parse_mode: 'HTML' });
             }
         } else if (status === 'kicked' || status === 'left') {
             db.groups = db.groups.filter(g => g.id !== chat.id);
-            bot.sendMessage(adminId, `❌ **GROUP REMOVED**\nBot was removed from: ${safeTitle}`, { parse_mode: 'HTML' });
+            bot.sendMessage(adminId, `❌ <b>GROUP REMOVED</b>\nBot was removed from: ${safeTitle}`, { parse_mode: 'HTML' });
         }
     }
 });
 
-// 2. Handle Chat Join Requests (Batch Processing)
+// 2. Handle Chat Join Requests (With fixed DM order)
 bot.on('chat_join_request', async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
     const group = db.groups.find(g => g.id === chatId);
     
-    // If group not found or auto-accept is OFF, ignore the request
+    // If group not found or auto-accept is OFF, ignore
     if (!group || group.autoAccept === false) return;
 
     if (!group.pendingUsers) group.pendingUsers = [];
 
-    // If delay is 0, accept instantly
+    // --- INSTANT ACCEPT LOGIC ---
     if (group.delayMs === 0) {
+        // Step 1: Send DM FIRST before permission is revoked
+        if (db.welcomeMessage) {
+            try {
+                await bot.sendMessage(userId, db.welcomeMessage);
+            } catch (error) {
+                console.log(`Failed to DM user ${userId}. They may have strict privacy settings.`);
+            }
+        }
+        
+        // Step 2: Approve Request SECOND
         try {
             await bot.approveChatJoinRequest(chatId, userId);
-            if (db.welcomeMessage) await bot.sendMessage(userId, db.welcomeMessage);
-        } catch (error) {}
+        } catch (error) {
+            console.log(`Failed to approve user ${userId}.`);
+        }
         return;
     }
 
-    // Add user to waiting room
+    // --- BATCH WAITING ROOM LOGIC ---
     group.pendingUsers.push(userId);
 
     // If FIRST person in waiting room, start batch timer
     if (group.pendingUsers.length === 1) {
         setTimeout(async () => {
             const usersToAccept = [...group.pendingUsers];
-            group.pendingUsers = []; 
+            group.pendingUsers = []; // Clear room for next batch
 
             for (const uid of usersToAccept) {
+                // Step 1: Send DM FIRST
+                if (db.welcomeMessage) {
+                    try {
+                        await bot.sendMessage(uid, db.welcomeMessage);
+                    } catch (error) {}
+                }
+                
+                // Step 2: Approve Request SECOND
                 try {
                     await bot.approveChatJoinRequest(chatId, uid);
-                    if (db.welcomeMessage) await bot.sendMessage(uid, db.welcomeMessage);
                 } catch (error) {}
             }
         }, group.delayMs);
@@ -89,15 +107,15 @@ bot.on('chat_join_request', async (msg) => {
 bot.on('message', async (msg) => {
     if (!msg.text || !isAdmin(msg) || msg.chat.type !== 'private') return;
 
-    const text = msg.text.trim(); // Removes accidental spaces
+    const text = msg.text.trim();
 
     // Command: /botmsg [text]
     if (text.startsWith('/botmsg')) {
         const newMsg = text.replace('/botmsg', '').trim();
-        if (!newMsg) return bot.sendMessage(adminId, "⚠️ **Oops!** You forgot the message.\nExample: <code>/botmsg Welcome to the club!</code>", { parse_mode: 'HTML' });
+        if (!newMsg) return bot.sendMessage(adminId, "⚠️ <b>Oops!</b> You forgot the message.\nExample: <code>/botmsg Welcome to the club!</code>", { parse_mode: 'HTML' });
         
         db.welcomeMessage = newMsg;
-        bot.sendMessage(adminId, `✅ **MESSAGE UPDATED**\nUsers will now receive this DM when accepted:\n\n${db.welcomeMessage}`, { parse_mode: 'HTML' });
+        bot.sendMessage(adminId, `✅ <b>MESSAGE UPDATED</b>\nUsers will now receive this DM when accepted:\n\n${db.welcomeMessage}`, { parse_mode: 'HTML' });
     }
 
     // Command: /setdelay [group_number] [seconds]
@@ -107,14 +125,14 @@ bot.on('message', async (msg) => {
         const seconds = parseInt(args[2]);
 
         if (isNaN(groupNum) || isNaN(seconds)) {
-            return bot.sendMessage(adminId, "⚠️ **Invalid Format.**\nExample: <code>/setdelay 1 15</code> (Sets Group 1 to wait 15 seconds before accepting)", { parse_mode: 'HTML' });
+            return bot.sendMessage(adminId, "⚠️ <b>Invalid Format.</b>\nExample: <code>/setdelay 1 15</code> (Sets Group 1 to wait 15 seconds before accepting)", { parse_mode: 'HTML' });
         }
 
         const groupIndex = groupNum - 1;
         if (!db.groups[groupIndex]) return bot.sendMessage(adminId, "⚠️ Invalid group number. Send /groups to check your list.");
 
         db.groups[groupIndex].delayMs = seconds * 1000;
-        bot.sendMessage(adminId, `✅ **DELAY SET SUCCESSFULLY**\nGroup: ${db.groups[groupIndex].title}\nBot will now wait ${seconds} seconds to gather users before accepting them all at once.`, { parse_mode: 'HTML' });
+        bot.sendMessage(adminId, `✅ <b>DELAY SET SUCCESSFULLY</b>\nGroup: ${db.groups[groupIndex].title}\nBot will now wait ${seconds} seconds to gather users before accepting them all at once.`, { parse_mode: 'HTML' });
     }
 
     // Command: /toggle [group_number]
@@ -122,7 +140,7 @@ bot.on('message', async (msg) => {
         const args = text.split(' ');
         const groupNum = parseInt(args[1]);
 
-        if (isNaN(groupNum)) return bot.sendMessage(adminId, "⚠️ **Invalid Format.**\nExample: <code>/toggle 1</code> (Turns Group 1 ON or OFF)", { parse_mode: 'HTML' });
+        if (isNaN(groupNum)) return bot.sendMessage(adminId, "⚠️ <b>Invalid Format.</b>\nExample: <code>/toggle 1</code> (Turns Group 1 ON or OFF)", { parse_mode: 'HTML' });
 
         const groupIndex = groupNum - 1;
         if (!db.groups[groupIndex]) return bot.sendMessage(adminId, "⚠️ Invalid group number. Send /groups to check your list.");
@@ -132,13 +150,13 @@ bot.on('message', async (msg) => {
         const isNowOn = db.groups[groupIndex].autoAccept;
         const statusText = isNowOn ? "🟢 ON (Bot is accepting users)" : "🔴 OFF (Bot is ignoring join requests)";
         
-        bot.sendMessage(adminId, `⚙️ **STATUS CHANGED**\nGroup: ${db.groups[groupIndex].title}\nAuto-Accept is now: ${statusText}`, { parse_mode: 'HTML' });
+        bot.sendMessage(adminId, `⚙️ <b>STATUS CHANGED</b>\nGroup: ${db.groups[groupIndex].title}\nAuto-Accept is now: ${statusText}`, { parse_mode: 'HTML' });
     }
 
     // Command: /groups - Dashboard view
     else if (text.startsWith('/groups')) {
         if (db.groups.length === 0) {
-            return bot.sendMessage(adminId, "⚠️ You haven't added the bot to any groups yet.\n\n*(Note: If Railway restarted, the bot's memory was wiped. Remove the bot from your group and add it back to re-register it).*");
+            return bot.sendMessage(adminId, "⚠️ You haven't added the bot to any groups yet.\n\n*(Note: If Railway restarted, the bot's memory was wiped. Remove the bot from your group and add it back to re-register it).*", { parse_mode: 'HTML' });
         }
         
         let list = "📋 <b>MANAGED GROUPS DASHBOARD:</b>\n\n";
